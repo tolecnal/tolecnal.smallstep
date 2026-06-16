@@ -1,0 +1,19 @@
+---
+- name: Issue Certificates to Clients
+  hosts: web_servers
+  gather_facts: true
+  become: true
+  roles:
+    - tolecnal.smallstep
+  vars:
+    smallstep_issue_cert: true
+    smallstep_ca_url: "https://ca.example.internal"
+    # smallstep_ca_delegate_host: "ca_server" # Optional if inventory name differs from URL
+    smallstep_provisioner_name: "ansible-jwk"
+    smallstep_provisioner_password: "{{ vault_smallstep_jwk_password }}"
+    smallstep_additional_sans:
+      - "www.example.internal"
+      - "*.example.internal"
+    smallstep_reload_services:
+      - nginx
+      - postgresql

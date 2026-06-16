@@ -1,0 +1,12 @@
+[Unit]
+Description=Timer for Smallstep Certificate Renewal
+
+[Timer]
+# By default we renew every day, but `step ca renew` will only actually renew
+# if the certificate has passed its renewal window (default 2/3 of lifetime).
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

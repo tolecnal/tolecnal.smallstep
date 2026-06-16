@@ -1,0 +1,15 @@
+---
+- name: Revoke a Client Certificate
+  hosts: specific_host_to_revoke
+  gather_facts: true
+  become: true
+  roles:
+    - tolecnal.smallstep
+  vars:
+    smallstep_revoke_cert: true
+    smallstep_ca_url: "https://ca.example.internal"
+    # smallstep_ca_delegate_host: "ca_server" # Optional if inventory name differs from URL
+    smallstep_provisioner_name: "ansible-jwk"
+    smallstep_provisioner_password: "{{ vault_smallstep_jwk_password }}"
+    # The certificate name typically defaults to the FQDN
+    smallstep_cert_name: "{{ ansible_facts['fqdn'] | lower }}"

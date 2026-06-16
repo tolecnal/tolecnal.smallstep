@@ -1,0 +1,461 @@
+---
+- name: Validate CA password is provided
+  ansible.builtin.assert:
+    that:
+      - smallstep_ca_password | length > 0
+    fail_msg: "smallstep_ca_password must be defined for CA initialization"
+
+- name: Create step user
+  ansible.builtin.user:
+    name: step
+    system: true
+    home: "{{ smallstep_ca_dir }}"
+    shell: /bin/false
+
+- name: Check if CA config exists
+  ansible.builtin.stat:
+    path: "{{ smallstep_ca_dir }}/config/ca.json"
+  register: ca_config
+
+- name: Check if Root CA cert exists
+  ansible.builtin.stat:
+    path: "{{ smallstep_ca_dir }}/certs/root_ca.crt"
+  register: _root_ca_stat
+
+- name: Stop step-ca service before re-initialization
+  ansible.builtin.systemd:
+    name: step-ca
+    state: stopped
+  when: smallstep_ca_reinit | bool
+  # Service might not exist if it's a completely fresh installation
+  failed_when: false
+
+- name: Re-initialize CA (remove existing data)
+  ansible.builtin.file:
+    path: "{{ smallstep_ca_dir }}/{{ item }}"
+    state: absent
+  loop:
+    - certs
+    - config
+    - db
+    - secrets
+  when: smallstep_ca_reinit | bool
+
+- name: Create CA directories
+  ansible.builtin.file:
+    path: "{{ smallstep_ca_dir }}/{{ item }}"
+    state: directory
+    owner: step
+    group: step
+    mode: "0700"
+  loop:
+    - ""
+    - certs
+    - secrets
+    - config
+    - db
+
+- name: Bootstrap CA securely
+  block:
+    - name: Write password file
+      ansible.builtin.copy:
+        content: "{{ smallstep_ca_password }}"
+        dest: "{{ smallstep_ca_dir }}/password.txt"
+        owner: step
+        group: step
+        mode: "0600"
+      no_log: true
+      when: smallstep_ca_reinit | bool or not ca_config.stat.exists
+
+    - name: Initialize Root CA
+      ansible.builtin.command:
+        cmd: >
+          step certificate create "{{ smallstep_ca_name }} Root CA"
+          "{{ smallstep_ca_dir }}/certs/root_ca.crt"
+          "{{ smallstep_ca_dir }}/secrets/root_ca_key"
+          --profile root-ca
+          --san="{{ smallstep_ca_dns }}"
+          {{ smallstep_ca_additional_sans | map('regex_replace', '^', '--san=') | join(' ') }}
+          --password-file "{{ smallstep_ca_dir }}/password.txt"
+      environment:
+        STEPPATH: "{{ smallstep_ca_dir }}"
+      become_user: step
+      become: true
+      when:
+        - smallstep_ca_type == 'root'
+        - smallstep_ca_reinit | bool or not _root_ca_stat.stat.exists
+      no_log: true
+      # Override required for accurate reporting
+      changed_when: true
+
+    - name: Initialize Standalone CA
+      when:
+        - smallstep_ca_type == 'standalone'
+        - smallstep_ca_reinit | bool or not ca_config.stat.exists
+      block:
+        - name: Execute step ca init
+          ansible.builtin.command:
+            cmd: >
+              step ca init
+              --name="{{ smallstep_ca_name }}"
+              --dns="{{ smallstep_ca_dns }}"
+              {{ smallstep_ca_additional_sans | map('regex_replace', '^', '--dns=') | join(' ') }}
+              --address="{{ smallstep_ca_address }}"
+              --provisioner="admin"
+              --password-file="{{ smallstep_ca_dir }}/password.txt"
+              --with-ca-url="{{ smallstep_ca_url }}"
+          environment:
+            STEPPATH: "{{ smallstep_ca_dir }}"
+          become_user: step
+          become: true
+          no_log: true
+          # Override required for accurate reporting
+          changed_when: true
+          notify: Restart step-ca
+
+        - name: Enforce Name Constraints for Standalone CA
+          when: smallstep_permitted_dns_domains | length > 0
+          block:
+            - name: Write Intermediate CA template
+              ansible.builtin.template:
+                src: intermediate.tpl.j2
+                dest: "/tmp/intermediate.tpl"
+                mode: "0600"
+                owner: step
+                group: step
+
+            - name: Create Intermediate CSR
+              ansible.builtin.command:
+                cmd: >
+                  step certificate create "{{ smallstep_ca_name }} Intermediate CA"
+                  "/tmp/intermediate.csr"
+                  "{{ smallstep_ca_dir }}/secrets/intermediate_ca_key"
+                  --csr
+                  --san="{{ smallstep_ca_dns }}"
+                  {{ smallstep_ca_additional_sans | map('regex_replace', '^', '--san=') | join(' ') }}
+                  --password-file "{{ smallstep_ca_dir }}/password.txt"
+                  --force
+              environment:
+                STEPPATH: "{{ smallstep_ca_dir }}"
+              become_user: step
+              become: true
+              no_log: true
+              # Override required for accurate reporting
+              changed_when: true
+
+            - name: Execute local signing on Standalone CA
+              ansible.builtin.command:
+                cmd: >
+                  step certificate sign
+                  "/tmp/intermediate.csr"
+                  "{{ smallstep_ca_dir }}/certs/root_ca.crt"
+                  "{{ smallstep_ca_dir }}/secrets/root_ca_key"
+                  --template "/tmp/intermediate.tpl"
+                  --password-file "{{ smallstep_ca_dir }}/password.txt"
+              environment:
+                STEPPATH: "{{ smallstep_ca_dir }}"
+              become_user: step
+              become: true
+              register: _standalone_signed_intermediate_crt
+              no_log: true
+              # Override required for accurate reporting
+              changed_when: true
+
+            - name: Write signed Intermediate cert (overwriting dummy)
+              ansible.builtin.copy:
+                content: "{{ _standalone_signed_intermediate_crt.stdout }}"
+                dest: "{{ smallstep_ca_dir }}/certs/intermediate_ca.crt"
+                mode: "0644"
+                owner: step
+                group: step
+              notify: Restart step-ca
+
+            - name: Clean up temporary files
+              ansible.builtin.file:
+                path: "{{ item }}"
+                state: absent
+              loop:
+                - "/tmp/intermediate.tpl"
+                - "/tmp/intermediate.csr"
+
+    - name: Initialize Intermediate CA
+      when:
+        - smallstep_ca_type == 'intermediate'
+        - smallstep_ca_reinit | bool or not ca_config.stat.exists
+      block:
+        - name: Validate smallstep_root_ca_host is defined
+          ansible.builtin.assert:
+            that:
+              - smallstep_root_ca_host | length > 0
+            fail_msg: "smallstep_root_ca_host must be defined for intermediate CA initialization"
+
+        - name: Execute step ca init for Intermediate config skeleton
+          ansible.builtin.command:
+            cmd: >
+              step ca init
+              --name="{{ smallstep_ca_name }}"
+              --dns="{{ smallstep_ca_dns }}"
+              {{ smallstep_ca_additional_sans | map('regex_replace', '^', '--dns=') | join(' ') }}
+              --address="{{ smallstep_ca_address }}"
+              --provisioner="admin"
+              --password-file="{{ smallstep_ca_dir }}/password.txt"
+              --with-ca-url="{{ smallstep_ca_url }}"
+          environment:
+            STEPPATH: "{{ smallstep_ca_dir }}"
+          become_user: step
+          become: true
+          no_log: true
+          # Override required for accurate reporting
+          changed_when: true
+
+        - name: Remove dummy root key
+          ansible.builtin.file:
+            path: "{{ smallstep_ca_dir }}/secrets/root_ca_key"
+            state: absent
+
+        - name: Create Intermediate CSR (overwriting dummy key)
+          ansible.builtin.command:
+            cmd: >
+              step certificate create "{{ smallstep_ca_name }} Intermediate CA"
+              "{{ smallstep_ca_dir }}/certs/intermediate_ca.csr"
+              "{{ smallstep_ca_dir }}/secrets/intermediate_ca_key"
+              --csr
+              --san="{{ smallstep_ca_dns }}"
+              {{ smallstep_ca_additional_sans | map('regex_replace', '^', '--san=') | join(' ') }}
+              --password-file "{{ smallstep_ca_dir }}/password.txt"
+              --force
+          environment:
+            STEPPATH: "{{ smallstep_ca_dir }}"
+          become_user: step
+          become: true
+          no_log: true
+          # Override required for accurate reporting
+          changed_when: true
+
+        - name: Read Intermediate CSR
+          ansible.builtin.slurp:
+            src: "{{ smallstep_ca_dir }}/certs/intermediate_ca.csr"
+          register: _intermediate_csr
+
+        - name: Sign CSR on Root CA
+          delegate_to: "{{ smallstep_root_ca_host | default(inventory_hostname, true) }}"
+          become: true
+          block:
+            - name: Write Intermediate CSR to Root CA
+              ansible.builtin.copy:
+                content: "{{ _intermediate_csr.content | b64decode }}"
+                dest: "/tmp/{{ inventory_hostname }}_intermediate_ca.csr"
+                mode: "0600"
+                owner: step
+                group: step
+
+            - name: Write Intermediate CA template to Root CA
+              ansible.builtin.template:
+                src: intermediate.tpl.j2
+                dest: "/tmp/{{ inventory_hostname }}_intermediate.tpl"
+                mode: "0600"
+                owner: step
+                group: step
+
+            - name: Execute signing on Root CA
+              ansible.builtin.command:
+                cmd: >
+                  step certificate sign
+                  "/tmp/{{ inventory_hostname }}_intermediate_ca.csr"
+                  "{{ smallstep_ca_dir }}/certs/root_ca.crt"
+                  "{{ smallstep_ca_dir }}/secrets/root_ca_key"
+                  --template "/tmp/{{ inventory_hostname }}_intermediate.tpl"
+                  --password-file "{{ smallstep_ca_dir }}/password.txt"
+              environment:
+                STEPPATH: "{{ smallstep_ca_dir }}"
+              become_user: step
+              become: true
+              register: _signed_intermediate_crt
+              no_log: true
+              # Override required for accurate reporting
+              changed_when: true
+
+            - name: Read Root CA cert from Root CA
+              ansible.builtin.slurp:
+                src: "{{ smallstep_ca_dir }}/certs/root_ca.crt"
+              register: _root_ca_crt
+
+            - name: Clean up temporary CSR and Template on Root CA
+              ansible.builtin.file:
+                path: "{{ item }}"
+                state: absent
+              loop:
+                - "/tmp/{{ inventory_hostname }}_intermediate_ca.csr"
+                - "/tmp/{{ inventory_hostname }}_intermediate.tpl"
+
+        - name: Write signed Intermediate cert (overwriting dummy)
+          ansible.builtin.copy:
+            content: "{{ _signed_intermediate_crt.stdout }}"
+            dest: "{{ smallstep_ca_dir }}/certs/intermediate_ca.crt"
+            mode: "0644"
+            owner: step
+            group: step
+          notify: Restart step-ca
+
+        - name: Write Root CA cert (overwriting dummy)
+          ansible.builtin.copy:
+            content: "{{ _root_ca_crt.content | b64decode }}"
+            dest: "{{ smallstep_ca_dir }}/certs/root_ca.crt"
+            mode: "0644"
+            owner: step
+            group: step
+          notify: Restart step-ca
+
+    - name: End play early for Root CA
+      ansible.builtin.meta: end_host
+      when: smallstep_ca_type == 'root'
+
+    - name: Enable CRL in ca.json
+      when: smallstep_ca_crl_enabled | bool
+      block:
+        - name: Read current ca.json for CRL patching
+          ansible.builtin.slurp:
+            src: "{{ smallstep_ca_dir }}/config/ca.json"
+          register: _ca_json_crl_raw
+          no_log: true
+
+        - name: Write updated ca.json with CRL enabled
+          ansible.builtin.copy:
+            content: >-
+              {{
+                (_ca_json_crl_raw.content | b64decode | from_json) |
+                combine({
+                  'crl': {
+                    'enabled': true,
+                    'generateOnRevoke': true,
+                    'cacheDuration': smallstep_ca_crl_cache_duration
+                  }
+                }, recursive=true) | to_nice_json
+              }}
+            dest: "{{ smallstep_ca_dir }}/config/ca.json"
+            owner: step
+            group: step
+            mode: "0600"
+          notify: Restart step-ca
+
+    - name: Read CA config
+      ansible.builtin.slurp:
+        src: "{{ smallstep_ca_dir }}/config/ca.json"
+      register: _ca_config_raw
+      no_log: true
+
+    - name: Parse existing provisioners
+      ansible.builtin.set_fact:
+        _existing_provisioners: "{{ (_ca_config_raw.content | b64decode | from_json).authority.provisioners }}"
+      # Override required for accurate reporting
+      changed_when: false
+
+    - name: Write temporary provisioner password
+      ansible.builtin.copy:
+        content: "{{ item.password | default(smallstep_provisioner_password, true) | default(smallstep_ca_password, true) }}"
+        dest: "{{ smallstep_ca_dir }}/.tmp_prov_{{ item.name }}.txt"
+        owner: step
+        group: step
+        mode: "0600"
+      no_log: true
+      when:
+        - item.type == 'JWK'
+        - item.name not in (_existing_provisioners | map(attribute='name') | list)
+      loop: "{{ smallstep_provisioners }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Execute step ca provisioner add
+      ansible.builtin.command:
+        cmd: >
+          step ca provisioner add "{{ item.name }}"
+          --type="JWK"
+          --create
+          --password-file="{{ smallstep_ca_dir }}/.tmp_prov_{{ item.name }}.txt"
+          --ca-config="{{ smallstep_ca_dir }}/config/ca.json"
+      environment:
+        STEPPATH: "{{ smallstep_ca_dir }}"
+      become_user: step
+      become: true
+      # Override required for accurate reporting
+      changed_when: true
+      notify: Restart step-ca
+      no_log: true
+      when:
+        - item.type == 'JWK'
+        - item.name not in (_existing_provisioners | map(attribute='name') | list)
+      loop: "{{ smallstep_provisioners }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Remove temporary provisioner password
+      ansible.builtin.file:
+        path: "{{ smallstep_ca_dir }}/.tmp_prov_{{ item.name }}.txt"
+        state: absent
+      when:
+        - item.type == 'JWK'
+        - item.name not in (_existing_provisioners | map(attribute='name') | list)
+      loop: "{{ smallstep_provisioners }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Add ACME provisioner
+      ansible.builtin.command:
+        cmd: >
+          step ca provisioner add "{{ item.name }}"
+          --type="ACME"
+          --ca-config="{{ smallstep_ca_dir }}/config/ca.json"
+      environment:
+        STEPPATH: "{{ smallstep_ca_dir }}"
+      become_user: step
+      become: true
+      when:
+        - item.type == 'ACME'
+        - item.name not in (_existing_provisioners | map(attribute='name') | list)
+      loop: "{{ smallstep_provisioners }}"
+      # Command only runs if provisioner is missing, thus always changing state
+      changed_when: true
+      notify: Restart step-ca
+
+- name: Update provisioner max lifetimes
+  ansible.builtin.command:
+    cmd: >
+      step ca provisioner update "{{ item.name }}"
+      --x509-max-dur="{{ smallstep_ca_cert_lifetime }}"
+      --x509-default-dur="{{ smallstep_ca_cert_lifetime }}"
+  environment:
+    STEPPATH: "{{ smallstep_ca_dir }}"
+  become_user: step
+  become: true
+  loop: "{{ smallstep_provisioners }}"
+  notify: Restart step-ca
+  # We do not parse json to check for changes so we suppress change logging
+  # Command provides status but no simple changed indicator
+  changed_when: false
+
+- name: Configure CA systemd service
+  ansible.builtin.template:
+    src: step-ca.service.j2
+    dest: /etc/systemd/system/step-ca.service
+    mode: "0644"
+  notify: Restart step-ca
+
+- name: Enable and start step-ca service
+  ansible.builtin.systemd:
+    name: step-ca
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Get CA fingerprint
+  ansible.builtin.command:
+    cmd: "step certificate fingerprint {{ smallstep_ca_dir }}/certs/root_ca.crt"
+  register: _smallstep_ca_fingerprint
+  # Override required for accurate reporting
+  changed_when: false
+
+- name: Display CA fingerprint
+  ansible.builtin.debug:
+    msg: >
+      The Root CA fingerprint is: {{ _smallstep_ca_fingerprint.stdout }}
+      Provide this as `smallstep_ca_fingerprint` to your clients for secure bootstrapping!

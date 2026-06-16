@@ -1,0 +1,38 @@
+---
+- name: Restart step-ca
+  ansible.builtin.systemd:
+    name: step-ca
+    state: restarted
+
+- name: Update CA certificates Debian
+  ansible.builtin.command: update-ca-certificates
+  # This command is run by a handler so it always changes state
+  changed_when: true
+  when: ansible_facts.os_family == 'Debian'
+
+- name: Update CA certificates RedHat
+  ansible.builtin.command: update-ca-trust extract
+  # This command is run by a handler so it always changes state
+  changed_when: true
+  when: ansible_facts.os_family == 'RedHat'
+
+- name: Daemon reload
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart step-renew timer
+  ansible.builtin.systemd:
+    name: step-renew.timer
+    state: restarted
+
+- name: Reload defined services
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: reloaded
+  loop: "{{ smallstep_reload_services }}"
+  register: _reload_result
+  # Services might be defined for reloading but not yet fully installed/running during the first playbook run.
+  # We fail on real errors but ignore "Could not find the requested service".
+  failed_when:
+    - _reload_result.failed
+    - "'Could not find the requested service' not in _reload_result.msg"

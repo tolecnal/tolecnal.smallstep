@@ -1,0 +1,166 @@
+---
+- name: Validate client variables
+  ansible.builtin.assert:
+    that:
+      - smallstep_ca_url | length > 0
+    fail_msg: "smallstep_ca_url must be defined for issuing certificates securely"
+
+- name: Validate JWK provisioner password
+  ansible.builtin.assert:
+    that:
+      - (smallstep_provisioner_password | default(smallstep_ca_password, true)) | length > 0
+    fail_msg: >
+      A valid provisioner password must be provided for JWK certificate issuance.
+      Ensure smallstep_provisioner_password or smallstep_ca_password is defined.
+  when: smallstep_provisioner_name == "ansible-jwk"
+
+- name: Auto-fetch CA fingerprint if not explicitly provided
+  when: smallstep_ca_fingerprint | default('') | length == 0
+  block:
+    - name: Controller fetches CA fingerprint from CA server via SSH (delegated)
+      ansible.builtin.command: "step certificate fingerprint {{ smallstep_ca_dir }}/certs/root_ca.crt"
+      delegate_to: "{{ smallstep_ca_delegate_host | default(smallstep_ca_url | urlsplit('hostname')) }}"
+      delegate_facts: false
+      register: _auto_fingerprint
+      # Override required for accurate reporting
+      changed_when: false
+      become: true
+
+    - name: Set fingerprint fact
+      ansible.builtin.set_fact:
+        smallstep_ca_fingerprint: "{{ _auto_fingerprint.stdout }}"
+- name: Ensure certificate directory exists
+  ansible.builtin.file:
+    path: "{{ smallstep_cert_path }}"
+    state: directory
+    mode: "0750"
+
+- name: Determine Root CA path
+  ansible.builtin.set_fact:
+    smallstep_root_ca_path: "{{ _paths[ansible_facts.os_family] | default(_paths['default']) }}"
+  vars:
+    _paths:
+      Debian: /usr/local/share/ca-certificates/smallstep_root_ca.crt
+      RedHat: /etc/pki/ca-trust/source/anchors/smallstep_root_ca.crt
+      default: /etc/ssl/certs/smallstep_root_ca.crt
+
+- name: Check local Root CA fingerprint
+  ansible.builtin.command: "step certificate fingerprint {{ smallstep_root_ca_path }}"
+  register: _local_fingerprint
+  # Override required for accurate reporting
+  changed_when: false
+  # Override required for accurate reporting
+  failed_when: false
+
+- name: Install root CA securely via smallstep
+  ansible.builtin.command:
+    cmd: >
+      step ca root "{{ smallstep_root_ca_path }}"
+      --ca-url="{{ smallstep_ca_url }}"
+      --fingerprint="{{ smallstep_ca_fingerprint }}"
+      --force
+  when: _local_fingerprint.rc != 0 or _local_fingerprint.stdout != smallstep_ca_fingerprint
+  # Override required for accurate reporting
+  changed_when: true
+  notify:
+    - Update CA certificates Debian
+    - Update CA certificates RedHat
+
+- name: Force CA certificates update immediately
+  ansible.builtin.meta: flush_handlers
+
+- name: Construct SANs list
+  ansible.builtin.set_fact:
+    _all_sans: >-
+      {{ ([smallstep_cert_name, ansible_facts['fqdn'] | lower, ansible_facts.get('default_ipv4', {}).get('address', '')] + smallstep_additional_sans)
+      | reject('equalto', '') | unique }}
+
+- name: Check if certificate already exists
+  ansible.builtin.stat:
+    path: "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+  register: _cert_stat
+
+- name: Issue Certificate with JWK
+  when:
+    - smallstep_provisioner_name == "ansible-jwk"
+    - not _cert_stat.stat.exists
+  block:
+    - name: Write provisioner password file
+      ansible.builtin.copy:
+        content: "{{ smallstep_provisioner_password | default(smallstep_ca_password, true) }}"
+        dest: "/root/.step_jwk_password"
+        mode: "0600"
+      no_log: true
+
+    - name: Issue Certificate
+      ansible.builtin.command:
+        cmd: >
+          step ca certificate "{{ smallstep_cert_name }}"
+          "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+          "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.key"
+          --provisioner="{{ smallstep_provisioner_name }}"
+          --provisioner-password-file="/root/.step_jwk_password"
+          {% for san in _all_sans %}
+          --san="{{ san }}"
+          {% endfor %}
+          --not-after="{{ smallstep_ca_cert_lifetime }}"
+          --ca-url="{{ smallstep_ca_url }}"
+          --root="{{ smallstep_root_ca_path }}"
+      args:
+        creates: "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+      no_log: true
+      notify: Reload defined services
+  always:
+    - name: Remove temporary client password file
+      ansible.builtin.file:
+        path: "/root/.step_jwk_password"
+        state: absent
+
+- name: Issue Certificate with ACME
+  ansible.builtin.command:
+    cmd: >
+      step ca certificate "{{ smallstep_cert_name }}"
+      "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+      "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.key"
+      --provisioner="{{ smallstep_provisioner_name }}"
+      {% for san in _all_sans %}
+      --san="{{ san }}"
+      {% endfor %}
+      --not-after="{{ smallstep_ca_cert_lifetime }}"
+      --ca-url="{{ smallstep_ca_url }}"
+      --root="{{ smallstep_root_ca_path }}"
+  args:
+    creates: "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+  when:
+    - smallstep_provisioner_name != "ansible-jwk"
+    - not _cert_stat.stat.exists
+  notify: Reload defined services
+
+- name: Create renewal script
+  ansible.builtin.template:
+    src: step-renew.sh.j2
+    dest: /usr/local/bin/step-renew.sh
+    mode: "0755"
+
+- name: Create renewal systemd service
+  ansible.builtin.template:
+    src: step-renew.service.j2
+    dest: /etc/systemd/system/step-renew.service
+    mode: "0644"
+  notify: Daemon reload
+
+- name: Create renewal systemd timer
+  ansible.builtin.template:
+    src: step-renew.timer.j2
+    dest: /etc/systemd/system/step-renew.timer
+    mode: "0644"
+  notify: Restart step-renew timer
+
+- name: Force daemon reload immediately
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable renewal timer
+  ansible.builtin.systemd:
+    name: step-renew.timer
+    enabled: true
+    state: started

@@ -1,0 +1,52 @@
+---
+# The location of the root CA certificate varies significantly between operating system families
+- name: Determine Root CA path
+  ansible.builtin.set_fact:
+    smallstep_root_ca_path: "{{ _paths[ansible_facts.os_family] | default(_paths['default']) }}"
+  vars:
+    _paths:
+      Debian: /usr/local/share/ca-certificates/smallstep_root_ca.crt
+      RedHat: /etc/pki/ca-trust/source/anchors/smallstep_root_ca.crt
+      default: /etc/ssl/certs/smallstep_root_ca.crt
+
+- name: Revoke Certificate with JWK
+  when: smallstep_provisioner_name == "ansible-jwk"
+  block:
+    - name: Write provisioner password file for revocation
+      ansible.builtin.copy:
+        content: "{{ smallstep_provisioner_password | default(smallstep_ca_password, true) }}"
+        dest: "/root/.step_jwk_password"
+        mode: "0600"
+      no_log: true
+
+    - name: Revoke Certificate
+      ansible.builtin.command:
+        cmd: >
+          step ca revoke "{{ smallstep_cert_name }}"
+          --cert="{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+          --key="{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.key"
+          --ca-url="{{ smallstep_ca_url }}"
+          --root="{{ smallstep_root_ca_path }}"
+          --provisioner="{{ smallstep_provisioner_name }}"
+          --provisioner-password-file="/root/.step_jwk_password"
+      # Revoking a certificate modifies the CA state
+      changed_when: true
+      no_log: true
+  always:
+    - name: Remove temporary password file unconditionally
+      ansible.builtin.file:
+        path: "/root/.step_jwk_password"
+        state: absent
+
+- name: Revoke Certificate with ACME
+  ansible.builtin.command:
+    cmd: >
+      step ca revoke "{{ smallstep_cert_name }}"
+      --cert="{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+      --key="{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.key"
+      --ca-url="{{ smallstep_ca_url }}"
+      --root="{{ smallstep_root_ca_path }}"
+      --provisioner="{{ smallstep_provisioner_name }}"
+  # Revoking a certificate modifies the CA state
+  changed_when: true
+  when: smallstep_provisioner_name != "ansible-jwk"

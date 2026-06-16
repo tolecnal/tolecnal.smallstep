@@ -1,0 +1,22 @@
+[Unit]
+Description=step-ca service
+Documentation=https://smallstep.com/docs/step-ca
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=step
+Group=step
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Environment=STEPPATH={{ smallstep_ca_dir }}
+ExecStart=/usr/local/bin/step-ca {{ smallstep_ca_dir }}/config/ca.json --password-file {{ smallstep_ca_dir }}/password.txt
+ExecReload=/bin/kill --signal HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=1048576
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

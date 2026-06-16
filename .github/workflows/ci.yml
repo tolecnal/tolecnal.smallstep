@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  lint:
+    name: Lint & Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install yamllint ansible-lint ansible-security-scanner
+          npm install -g markdownlint-cli
+
+      - name: Run yamllint
+        run: yamllint .
+
+      - name: Run markdownlint
+        run: markdownlint-cli *.md
+
+      - name: Run ansible-lint
+        run: ansible-lint .
+
+      - name: Run ansible-security-scanner
+        run: ansible-security-scanner .
+
+  molecule:
+    name: Molecule Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Molecule & Docker SDK
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible-core molecule molecule-plugins[docker] docker
+
+      - name: Run Molecule Test
+        run: molecule test

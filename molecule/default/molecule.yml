@@ -1,0 +1,72 @@
+---
+dependency:
+  name: galaxy
+driver:
+  name: docker
+platforms:
+  - name: root_ca_server
+    image: geerlingguy/docker-debian12-ansible:latest
+    command: /lib/systemd/systemd
+    privileged: true
+    cgroupns_mode: host
+    network_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups:
+      - root_ca_servers
+  - name: intermediate_ca_server
+    image: geerlingguy/docker-debian12-ansible:latest
+    command: /lib/systemd/systemd
+    privileged: true
+    cgroupns_mode: host
+    network_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups:
+      - intermediate_ca_servers
+  - name: client_server
+    image: geerlingguy/docker-debian12-ansible:latest
+    command: /lib/systemd/systemd
+    privileged: true
+    cgroupns_mode: host
+    network_mode: host
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    groups:
+      - web_servers
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      remote_tmp: /tmp/ansible
+  inventory:
+    group_vars:
+      all:
+        smallstep_ca_password: "molecule-test-password"
+        smallstep_jwk_password: "molecule-test-password"
+      root_ca_servers:
+        smallstep_ca_init: true
+        smallstep_ca_type: "root"
+      intermediate_ca_servers:
+        smallstep_ca_init: true
+        smallstep_ca_type: "intermediate"
+        smallstep_root_ca_host: "root_ca_server"
+        smallstep_permitted_dns_domains: ["localhost", "client_server", "clientserver", "client_server.local"]
+        smallstep_ca_dns: "localhost"
+        smallstep_ca_address: ":8443"
+        smallstep_ca_url: "https://localhost:8443"
+        smallstep_provisioners:
+          - name: "ansible-jwk"
+            type: "JWK"
+            password: "{{ smallstep_jwk_password }}"
+      web_servers:
+        smallstep_issue_cert: true
+        smallstep_ca_url: "https://localhost:8443"
+        smallstep_ca_delegate_host: "intermediate_ca_server"
+        smallstep_provisioner_name: "ansible-jwk"
+        smallstep_provisioner_password: "{{ smallstep_jwk_password }}"
+        smallstep_cert_name: "client_server"
+        smallstep_additional_sans:
+          - "client_server.local"
+verifier:
+  name: ansible

@@ -1,0 +1,19 @@
+{
+  "subject": {
+    "commonName": "{{ '{{' }} .Subject.CommonName {{ '}}' }}"
+  },
+  "keyUsage": ["certSign", "crlSign"],
+  "basicConstraints": {
+    "isCA": true,
+    "maxPathLen": 0
+  }{% if smallstep_permitted_dns_domains | length > 0 or smallstep_permitted_ip_ranges | length > 0 %},
+  "nameConstraints": {
+    "critical": true
+    {%- if smallstep_permitted_dns_domains | length > 0 %},
+    "permittedDNSDomains": {{ smallstep_permitted_dns_domains | to_json }}
+    {%- endif %}
+    {%- if smallstep_permitted_ip_ranges | length > 0 %},
+    "permittedIPRanges": {{ smallstep_permitted_ip_ranges | to_json }}
+    {%- endif %}
+  }{% endif %}
+}

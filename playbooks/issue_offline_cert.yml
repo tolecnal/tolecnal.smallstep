@@ -1,0 +1,19 @@
+---
+- name: Issue Offline Certificate
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: tolecnal.smallstep
+  vars:
+    smallstep_issue_offline: true
+    smallstep_ca_url: "https://ca.example.internal"
+    smallstep_provisioner_password: "{{ vault_smallstep_jwk_password }}"
+    # smallstep_ca_delegate_host: "ca_servers_inventory_name"
+    
+    smallstep_cert_name: "switch.example.internal"
+    smallstep_cert_path: "/tmp/certs"
+    smallstep_additional_sans:
+      - "192.168.1.50"
+      - "management.example.internal"

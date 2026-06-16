@@ -1,0 +1,39 @@
+---
+- name: Verify CA
+  hosts: intermediate_ca_servers
+  become: true
+  tasks:
+    - name: Check if CA service is running
+      ansible.builtin.systemd:
+        name: step-ca
+        state: started
+      check_mode: true
+      register: _ca_status
+
+    - name: Assert CA is running
+      ansible.builtin.assert:
+        that: not _ca_status.changed
+
+- name: Verify Client
+  hosts: web_servers
+  become: true
+  tasks:
+    - name: Check if certificate exists
+      ansible.builtin.stat:
+        path: /etc/ssl/smallstep/client_server.crt
+      register: _cert
+
+    - name: Assert certificate exists
+      ansible.builtin.assert:
+        that: _cert.stat.exists
+
+    - name: Check if timer is active
+      ansible.builtin.systemd:
+        name: step-renew.timer
+        state: started
+      check_mode: true
+      register: _timer_status
+
+    - name: Assert timer is running
+      ansible.builtin.assert:
+        that: not _timer_status.changed

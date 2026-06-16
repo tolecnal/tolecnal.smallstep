@@ -1,0 +1,20 @@
+#!/bin/bash
+set -e
+
+# Ansible managed renewal script for {{ smallstep_cert_name }}
+
+{% set reload_cmds = [] %}
+{% for svc in smallstep_reload_services %}
+{% set _ = reload_cmds.append('systemctl reload-or-restart ' ~ svc) %}
+{% endfor %}
+
+/usr/local/bin/step ca renew "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt" \
+  "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.key" \
+  --force \
+  --ca-url="{{ smallstep_ca_url }}" \
+  --root="{{ smallstep_root_ca_path }}" \
+{% if reload_cmds | length > 0 %}
+  --exec="{{ reload_cmds | join(' && ') }}"
+{% endif %}
+
+exit 0

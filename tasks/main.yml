@@ -1,0 +1,33 @@
+---
+- name: Validate required variables
+  ansible.builtin.assert:
+    that:
+      - not (smallstep_ca_init and smallstep_issue_cert)
+    fail_msg: "A host cannot be both a CA and a client in the same run."
+
+- name: Install Smallstep binaries
+  ansible.builtin.include_tasks: install.yml
+
+- name: Setup Smallstep CA
+  ansible.builtin.include_tasks: ca.yml
+  when: smallstep_ca_init | bool
+
+- name: Issue Certificates
+  ansible.builtin.include_tasks: client.yml
+  when: smallstep_issue_cert | bool
+
+- name: Revoke Certificates
+  ansible.builtin.include_tasks: revoke.yml
+  when: smallstep_revoke_cert | bool
+
+- name: Renew Certificates Manually
+  ansible.builtin.include_tasks: renew.yml
+  when: smallstep_renew_cert | bool
+
+- name: Sign Offline CSR
+  ansible.builtin.include_tasks: sign_csr.yml
+  when: smallstep_sign_csr | bool
+
+- name: Issue Offline Certificate
+  ansible.builtin.include_tasks: offline_cert.yml
+  when: smallstep_issue_offline | bool

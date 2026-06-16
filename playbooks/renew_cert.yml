@@ -1,0 +1,10 @@
+---
+- name: Manually Renew Certificates
+  hosts: web_servers
+  gather_facts: true
+  become: true
+  roles:
+    - tolecnal.smallstep
+  vars:
+    smallstep_renew_cert: true
+    # This just executes the renewal script we laid down during issuance

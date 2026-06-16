@@ -1,0 +1,6 @@
+---
+- name: Manually renew certificate
+  ansible.builtin.command:
+    cmd: /usr/local/bin/step-renew.sh
+  # Renewing a certificate modifies the system
+  changed_when: true

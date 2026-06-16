@@ -1,0 +1,80 @@
+---
+- name: Validate offline cert requirements
+  ansible.builtin.assert:
+    that:
+      - smallstep_ca_url | length > 0
+    fail_msg: "smallstep_ca_url must be defined to issue an offline certificate"
+
+- name: Auto-fetch CA fingerprint if not explicitly provided
+  when: smallstep_ca_fingerprint | default('') | length == 0
+  block:
+    - name: Controller fetches CA fingerprint from CA server via SSH (delegated)
+      ansible.builtin.command: "step certificate fingerprint {{ smallstep_ca_dir }}/certs/root_ca.crt"
+      delegate_to: "{{ smallstep_ca_delegate_host | default(smallstep_ca_url | urlsplit('hostname')) }}"
+      delegate_facts: false
+      register: _auto_fingerprint
+      # Override required for accurate reporting
+      changed_when: false
+      become: true
+
+    - name: Set fingerprint fact
+      ansible.builtin.set_fact:
+        smallstep_ca_fingerprint: "{{ _auto_fingerprint.stdout }}"
+
+- name: Ensure target certificate directory exists
+  ansible.builtin.file:
+    path: "{{ smallstep_cert_path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  become: true
+
+- name: Bootstrap CA trust
+  ansible.builtin.command:
+    cmd: "step ca bootstrap --ca-url {{ smallstep_ca_url }} --fingerprint {{ smallstep_ca_fingerprint }} --install --force"
+  # Override required for accurate reporting
+  changed_when: false
+  become: true
+  environment:
+    STEPPATH: "/root/.step"
+
+- name: Write temporary provisioner password
+  ansible.builtin.copy:
+    content: "{{ smallstep_provisioner_password | default(smallstep_ca_password, true) }}"
+    dest: "/root/.step/.tmp_prov.txt"
+    owner: root
+    mode: "0600"
+  become: true
+  no_log: true
+
+- name: Issue Offline Certificate
+  ansible.builtin.command:
+    cmd: >
+      step ca certificate "{{ smallstep_cert_name }}"
+      "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.crt"
+      "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.key"
+      --provisioner="{{ smallstep_provisioner_name | default('ansible-jwk') }}"
+      --password-file="/root/.step/.tmp_prov.txt"
+      {{ smallstep_additional_sans | map('regex_replace', '^', '--san=') | join(' ') }}
+      --force
+  become: true
+  no_log: true
+  # Override required for accurate reporting
+  changed_when: true
+  environment:
+    STEPPATH: "/root/.step"
+
+- name: Ensure proper permissions on the offline private key
+  ansible.builtin.file:
+    path: "{{ smallstep_cert_path }}/{{ smallstep_cert_name }}.key"
+    mode: "0600"
+    owner: root
+    group: root
+  become: true
+
+- name: Remove temporary provisioner password
+  ansible.builtin.file:
+    path: "/root/.step/.tmp_prov.txt"
+    state: absent
+  become: true

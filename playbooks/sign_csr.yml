@@ -1,0 +1,17 @@
+---
+- name: Sign Offline CSR
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  roles:
+    - role: tolecnal.smallstep
+  vars:
+    smallstep_sign_csr: true
+    smallstep_ca_url: "https://ca.example.internal"
+    smallstep_provisioner_password: "{{ vault_smallstep_jwk_password }}"
+    # smallstep_ca_delegate_host: "ca_servers_inventory_name"
+    
+    smallstep_csr_path: "/tmp/appliance.csr"
+    smallstep_cert_name: "appliance.example.internal"
+    smallstep_cert_path: "/tmp/certs"

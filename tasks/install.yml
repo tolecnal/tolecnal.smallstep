@@ -1,0 +1,59 @@
+---
+- name: Determine architecture
+  ansible.builtin.set_fact:
+    # noqa yaml[line-length]
+    smallstep_arch: "{{ 'amd64' if ansible_facts.architecture == 'x86_64' else 'arm64' if ansible_facts.architecture == 'aarch64' else ansible_facts.architecture }}"
+
+- name: Download step CLI
+  ansible.builtin.get_url:
+    # noqa yaml[line-length]
+    url: "https://github.com/smallstep/cli/releases/download/v{{ smallstep_cli_version }}/step_linux_{{ smallstep_cli_version }}_{{ smallstep_arch }}.tar.gz"
+    dest: "/tmp/step_linux_{{ smallstep_cli_version }}_{{ smallstep_arch }}.tar.gz"
+    checksum: "sha256:https://github.com/smallstep/cli/releases/download/v{{ smallstep_cli_version }}/checksums.txt"
+    mode: "0644"
+
+- name: Extract step CLI
+  ansible.builtin.unarchive:
+    src: "/tmp/step_linux_{{ smallstep_cli_version }}_{{ smallstep_arch }}.tar.gz"
+    dest: "/tmp/"
+    remote_src: true
+    creates: "/tmp/step_{{ smallstep_cli_version }}"
+
+- name: Install step CLI binary
+  ansible.builtin.copy:
+    src: "/tmp/step_{{ smallstep_cli_version }}/bin/step"
+    dest: "/usr/local/bin/step"
+    mode: "0755"
+    remote_src: true
+
+- name: Download step-ca
+  ansible.builtin.get_url:
+    # noqa yaml[line-length]
+    url: "https://github.com/smallstep/certificates/releases/download/v{{ smallstep_ca_version }}/step-ca_linux_{{ smallstep_ca_version }}_{{ smallstep_arch }}.tar.gz"
+    dest: "/tmp/step-ca_linux_{{ smallstep_ca_version }}_{{ smallstep_arch }}.tar.gz"
+    checksum: "sha256:https://github.com/smallstep/certificates/releases/download/v{{ smallstep_ca_version }}/checksums.txt"
+    mode: "0644"
+  when: smallstep_ca_init | bool
+
+- name: Create temp directory for step-ca
+  ansible.builtin.file:
+    path: "/tmp/step-ca_{{ smallstep_ca_version }}"
+    state: directory
+    mode: "0755"
+  when: smallstep_ca_init | bool
+
+- name: Extract step-ca
+  ansible.builtin.unarchive:
+    src: "/tmp/step-ca_linux_{{ smallstep_ca_version }}_{{ smallstep_arch }}.tar.gz"
+    dest: "/tmp/step-ca_{{ smallstep_ca_version }}"
+    remote_src: true
+    creates: "/tmp/step-ca_{{ smallstep_ca_version }}/step-ca"
+  when: smallstep_ca_init | bool
+
+- name: Install step-ca binary
+  ansible.builtin.copy:
+    src: "/tmp/step-ca_{{ smallstep_ca_version }}/step-ca"
+    dest: "/usr/local/bin/step-ca"
+    mode: "0755"
+    remote_src: true
+  when: smallstep_ca_init | bool

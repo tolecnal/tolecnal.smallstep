@@ -1,0 +1,54 @@
+---
+# Core Mode toggles
+smallstep_ca_init: false
+smallstep_ca_reinit: false
+smallstep_issue_cert: false
+smallstep_revoke_cert: false
+smallstep_renew_cert: false
+smallstep_sign_csr: false
+smallstep_issue_offline: false
+smallstep_csr_path: ""
+
+# Versions
+smallstep_cli_version: "0.26.1"
+smallstep_ca_version: "0.26.0"
+
+# CA Configuration (Used when smallstep_ca_init is true)
+smallstep_ca_type: "standalone" # standalone, root, or intermediate
+smallstep_root_ca_host: "" # Required if type is intermediate
+smallstep_ca_name: "Internal CA"
+smallstep_ca_dns: "{{ ansible_facts['fqdn'] | default(ansible_facts['nodename']) }}"
+smallstep_ca_additional_sans: []
+smallstep_ca_crl_enabled: false
+smallstep_ca_crl_cache_duration: "24h"
+smallstep_ca_address: ":443"
+smallstep_ca_url: "https://{{ smallstep_ca_dns }}"
+smallstep_ca_dir: "/etc/step-ca"
+smallstep_ca_password: "" # MUST BE VAULTED
+smallstep_ca_cert_lifetime: "4320h" # 180 days default
+smallstep_permitted_dns_domains: []
+#  - ".example.internal"
+#  - ".example.internal"
+
+smallstep_permitted_ip_ranges:
+  - "0.0.0.0/0"
+  - "::/0"
+
+smallstep_provisioners:
+  - name: "ansible-jwk"
+    type: "JWK"
+    password: "{{ smallstep_provisioner_password }}" # Automatically syncs with client configuration
+  - name: "acme"
+    type: "ACME"
+
+# Client Configuration (Used when smallstep_issue_cert is true)
+smallstep_ca_fingerprint: "" # Optional. Auto-fetched via SSH from the CA server if omitted.
+smallstep_ca_delegate_host: "" # Optional. The Ansible inventory hostname of the CA server to SSH into (defaults to the hostname in smallstep_ca_url).
+smallstep_cert_name: "{{ (ansible_facts['fqdn'] | default(ansible_facts['nodename'])) | lower }}"
+smallstep_cert_path: "/etc/ssl/smallstep"
+smallstep_additional_sans: []
+smallstep_provisioner_name: "ansible-jwk"
+smallstep_provisioner_password: "" # Vaulted password to use for the jwk provisioner
+
+# List of services to restart/reload when a cert is issued or renewed
+smallstep_reload_services: []
